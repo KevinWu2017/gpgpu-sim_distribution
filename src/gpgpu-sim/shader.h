@@ -100,6 +100,17 @@ class thread_ctx_t {
   bool m_active;
 };
 
+/*
+  note: 表示 一个“warp”的模拟状态（即一个 GPU 执行单元内的 32 个线程组的抽象）
+  每个 shd_warp_t 对象代表一个 Warp，它属于某个 shader_core_ctx（即 SM）
+  维护 warp 内的执行状态，如：
+    活跃线程掩码（哪些线程在执行）
+    当前指令缓冲区（Instruction Buffer）
+    Memory barrier 状态
+    是否在等待访存返回
+    是否执行完毕（done_exit）
+    outstanding store / atomic 数量
+*/ 
 class shd_warp_t {
  public:
   shd_warp_t(class shader_core_ctx *shader, unsigned warp_size)

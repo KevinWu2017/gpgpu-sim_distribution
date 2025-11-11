@@ -2226,22 +2226,30 @@ void shader_core_ctx::dump_warp_state(FILE *fout) const {
     m_warp[w]->print(fout);
 }
 
+// note: 模拟一次从主机（CPU）内存到设备（GPU）内存的复制操作（Host-to-Device Memory Copy）
 void gpgpu_sim::perf_memcpy_to_gpu(size_t dst_start_addr, size_t count) {
+  // 性能模拟开关检查
   if (m_memory_config->m_perf_sim_memcpy) {
     // if(!m_config.trace_driven_mode)    //in trace-driven mode, CUDA runtime
     // can start nre data structure at any position 	assert (dst_start_addr %
     // 32
     //== 0);
-
+    // 按段（Sector）处理复制
     for (unsigned counter = 0; counter < count; counter += 32) {
+      // 计算当前段的写入地址
       const unsigned wr_addr = dst_start_addr + counter;
+      // 声明地址解码和掩码结构
       addrdec_t raw_addr;
       mem_access_sector_mask_t mask;
+      // 设置段掩码
       mask.set(wr_addr % 128 / 32);
+      // 地址解码（Address Decoding）
       m_memory_config->m_address_mapping.addrdec_tlx(wr_addr, &raw_addr);
+      // 确定内存分区 ID
       const unsigned partition_id =
           raw_addr.sub_partition /
           m_memory_config->m_n_sub_partition_per_memory_channel;
+      // 处理内存复制操作
       m_memory_partition_unit[partition_id]->handle_memcpy_to_gpu(
           wr_addr, raw_addr.sub_partition, mask);
     }

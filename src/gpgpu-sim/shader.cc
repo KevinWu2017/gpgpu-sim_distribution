@@ -91,23 +91,35 @@ std::list<unsigned> shader_core_ctx::get_regs_written(const inst_t &fvt) const {
   return result;
 }
 
+// note: 在 GPU 模拟器（如 GPGPU-Sim）中 为着色器核心（shader core）创建并初始化 warp 管理对象。
 void exec_shader_core_ctx::create_shd_warp() {
+  // 将 m_warp 的大小调整为最大 warp 数，为后续分配每个 warp 的对象预留空间。
   m_warp.resize(m_config->max_warps_per_shader);
+
+  // 循环创建每个 warp 对象
   for (unsigned k = 0; k < m_config->max_warps_per_shader; ++k) {
     m_warp[k] = new shd_warp_t(this, m_config->warp_size);
   }
 }
 
+// note: 创建前端流水线（front-end pipeline）的寄存器、线程状态、指令缓存和内存接口等关键结构。
 void shader_core_ctx::create_front_pipeline() {
   // pipeline_stages is the sum of normal pipeline stages and specialized_unit
   // stages * 2 (for ID and EX)
+  // 计算总流水线级数
   unsigned total_pipeline_stages =
       N_PIPELINE_STAGES + m_config->m_specialized_unit.size() * 2;
+  
+  // 预分配空间
   m_pipeline_reg.reserve(total_pipeline_stages);
+
+  // 添加标准流水线阶段
   for (int j = 0; j < N_PIPELINE_STAGES; j++) {
     m_pipeline_reg.push_back(
         register_set(m_config->pipe_widths[j], pipeline_stage_name_decode[j]));
   }
+
+  // 添加专用单元的 ID→OC 阶段
   for (unsigned j = 0; j < m_config->m_specialized_unit.size(); j++) {
     m_pipeline_reg.push_back(
         register_set(m_config->m_specialized_unit[j].id_oc_spec_reg_width,
@@ -116,6 +128,8 @@ void shader_core_ctx::create_front_pipeline() {
     m_specilized_dispatch_reg.push_back(
         &m_pipeline_reg[m_pipeline_reg.size() - 1]);
   }
+
+  // 添加专用单元的 OC→EX 阶段
   for (unsigned j = 0; j < m_config->m_specialized_unit.size(); j++) {
     m_pipeline_reg.push_back(
         register_set(m_config->m_specialized_unit[j].oc_ex_spec_reg_width,
@@ -123,6 +137,7 @@ void shader_core_ctx::create_front_pipeline() {
     m_config->m_specialized_unit[j].OC_EX_SPEC_ID = m_pipeline_reg.size() - 1;
   }
 
+  // 子核模型（Sub-core Model）校验
   if (m_config->sub_core_model) {
     // in subcore model, each scheduler should has its own issue register, so
     // ensure num scheduler = reg width
@@ -148,6 +163,7 @@ void shader_core_ctx::create_front_pipeline() {
     }
   }
 
+  // 线程状态（Thread Context）初始化
   m_threadState = (thread_ctx_t *)calloc(sizeof(thread_ctx_t),
                                          m_config->n_thread_per_shader);
 
@@ -161,6 +177,7 @@ void shader_core_ctx::create_front_pipeline() {
     m_threadState[i].m_active = false;
   }
 
+  // 内存接口（Memory Interface）创建
   // m_icnt = new shader_memory_interface(this,cluster);
   if (m_memory_config->SST_mode) {
     m_icnt = new sst_memory_interface(
@@ -173,9 +190,11 @@ void shader_core_ctx::create_front_pipeline() {
   m_mem_fetch_allocator =
       new shader_core_mem_fetch_allocator(m_sid, m_tpc, m_memory_config);
 
+  // 指令获取（Fetch）相关初始化
   // fetch
   m_last_warp_fetched = 0;
 
+// L1 指令缓存（L1I Cache）创建
 #define STRSIZE 1024
   char name[STRSIZE];
   snprintf(name, STRSIZE, "L1I_%03d", m_sid);
@@ -184,11 +203,15 @@ void shader_core_ctx::create_front_pipeline() {
                               IN_L1I_MISS_QUEUE, OTHER_GPU_CACHE, m_gpu);
 }
 
+// note: 它就是在 shader core（即一个 SM）的上下文里创建并分配 warp 调度器（schedulers） 的工厂/初始化逻辑
 void shader_core_ctx::create_schedulers() {
+
+  // 创建 Scoreboard 实例并绑到这个 shader core
   m_scoreboard = new Scoreboard(m_sid, m_config->max_warps_per_shader, m_gpu);
 
   // scedulers
   // must currently occur after all inputs have been initialized.
+  // 选择具体的调度器类型（解析配置字符串）
   std::string sched_config = m_config->gpgpu_scheduler_string;
   const concrete_scheduler scheduler =
       sched_config.find("lrr") != std::string::npos ? CONCRETE_SCHEDULER_LRR
@@ -203,6 +226,7 @@ void shader_core_ctx::create_schedulers() {
           : NUM_CONCRETE_SCHEDULERS;
   assert(scheduler != NUM_CONCRETE_SCHEDULERS);
 
+  // 选择warp调度策略
   for (unsigned i = 0; i < m_config->gpgpu_num_sched_per_core; i++) {
     switch (scheduler) {
       case CONCRETE_SCHEDULER_LRR:
@@ -258,6 +282,7 @@ void shader_core_ctx::create_schedulers() {
     };
   }
 
+  // 以轮询的方式给scheduler分配warp
   for (unsigned i = 0; i < m_warp.size(); i++) {
     // distribute i's evenly though schedulers;
     schedulers[i % m_config->gpgpu_num_sched_per_core]->add_supervised_warp_id(
@@ -268,27 +293,34 @@ void shader_core_ctx::create_schedulers() {
   }
 }
 
+// note: 执行流水线的初始化逻辑
 void shader_core_ctx::create_exec_pipeline() {
   // op collector configuration
+  // 定义功能单元类型枚举
   enum { SP_CUS, DP_CUS, SFU_CUS, TENSOR_CORE_CUS, INT_CUS, MEM_CUS, GEN_CUS };
 
-  opndcoll_rfu_t::port_vector_t in_ports;
-  opndcoll_rfu_t::port_vector_t out_ports;
-  opndcoll_rfu_t::uint_vector_t cu_sets;
+  // 通用操作数收集器（Generic Collector）
+  opndcoll_rfu_t::port_vector_t in_ports;     // 指令从 ID 阶段进入操作数收集器的“入口寄存器”
+  opndcoll_rfu_t::port_vector_t out_ports;    // 指令从操作数收集器输出到 EX 阶段的“出口寄存器”
+  opndcoll_rfu_t::uint_vector_t cu_sets;      // 告诉操作数收集器：当你处理 cu_sets 类型的指令时，可以从 in_ports 中取指令，处理完后放到 out_ports 中。
 
   // configure generic collectors
   m_operand_collector.add_cu_set(
       GEN_CUS, m_config->gpgpu_operand_collector_num_units_gen,
       m_config->gpgpu_operand_collector_num_out_ports_gen);
 
+  // 配置输入/输出端口（Port Mapping）
   for (unsigned i = 0; i < m_config->gpgpu_operand_collector_num_in_ports_gen;
        i++) {
+    // 无条件添加常见单元
     in_ports.push_back(&m_pipeline_reg[ID_OC_SP]);
     in_ports.push_back(&m_pipeline_reg[ID_OC_SFU]);
     in_ports.push_back(&m_pipeline_reg[ID_OC_MEM]);
     out_ports.push_back(&m_pipeline_reg[OC_EX_SP]);
     out_ports.push_back(&m_pipeline_reg[OC_EX_SFU]);
     out_ports.push_back(&m_pipeline_reg[OC_EX_MEM]);
+
+    // 条件添加其他单元（按硬件配置）
     if (m_config->gpgpu_tensor_core_avail) {
       in_ports.push_back(&m_pipeline_reg[ID_OC_TENSOR_CORE]);
       out_ports.push_back(&m_pipeline_reg[OC_EX_TENSOR_CORE]);
@@ -309,12 +341,16 @@ void shader_core_ctx::create_exec_pipeline() {
             &m_pipeline_reg[m_config->m_specialized_unit[j].OC_EX_SPEC_ID]);
       }
     }
+    // 关联到 GEN_CUS
     cu_sets.push_back((unsigned)GEN_CUS);
     m_operand_collector.add_port(in_ports, out_ports, cu_sets);
     in_ports.clear(), out_ports.clear(), cu_sets.clear();
   }
 
+  // 专用操作数收集器（Specialized Collectors，可选）
   if (m_config->enable_specialized_operand_collector) {
+
+    // 注册专用的 CU Sets（Collector Unit Sets）
     m_operand_collector.add_cu_set(
         SP_CUS, m_config->gpgpu_operand_collector_num_units_sp,
         m_config->gpgpu_operand_collector_num_out_ports_sp);
@@ -335,12 +371,18 @@ void shader_core_ctx::create_exec_pipeline() {
         INT_CUS, m_config->gpgpu_operand_collector_num_units_int,
         m_config->gpgpu_operand_collector_num_out_ports_int);
 
+    // 为每类指令配置 专用输入/输出端口 + 回退机制
     for (unsigned i = 0; i < m_config->gpgpu_operand_collector_num_in_ports_sp;
          i++) {
+      // 该通道从 SP 指令专用入口寄存器 读取指令
       in_ports.push_back(&m_pipeline_reg[ID_OC_SP]);
+      // 处理完后写入 SP 执行入口寄存器
       out_ports.push_back(&m_pipeline_reg[OC_EX_SP]);
+      // 优先使用 SP 专用收集资源池
       cu_sets.push_back((unsigned)SP_CUS);
+      // 同时允许回退到通用资源池（如果 SP_CUS 忙）
       cu_sets.push_back((unsigned)GEN_CUS);
+      // 注册这个“SP 通道”，并绑定可用的 CU Sets
       m_operand_collector.add_port(in_ports, out_ports, cu_sets);
       in_ports.clear(), out_ports.clear(), cu_sets.clear();
     }
@@ -398,6 +440,7 @@ void shader_core_ctx::create_exec_pipeline() {
 
   m_operand_collector.init(m_config->gpgpu_num_reg_banks, this);
 
+  // 计算总功能单元数量
   m_num_function_units =
       m_config->gpgpu_num_sp_units + m_config->gpgpu_num_dp_units +
       m_config->gpgpu_num_sfu_units + m_config->gpgpu_num_tensor_core_units +
@@ -408,35 +451,46 @@ void shader_core_ctx::create_exec_pipeline() {
 
   // m_fu = new simd_function_unit*[m_num_function_units];
 
+  // 创建各类功能单元并记录端口映射
+  // SP 单元（单精度浮点）
   for (unsigned k = 0; k < m_config->gpgpu_num_sp_units; k++) {
+    // 创建实际的功能单元对象
     m_fu.push_back(new sp_unit(&m_pipeline_reg[EX_WB], m_config, this, k));
+    // 记录该单元的“分发端口”
     m_dispatch_port.push_back(ID_OC_SP);
+    // 记录该单元的“发射端口”
     m_issue_port.push_back(OC_EX_SP);
   }
 
+  // dp_unit → 双精度浮点
   for (unsigned k = 0; k < m_config->gpgpu_num_dp_units; k++) {
     m_fu.push_back(new dp_unit(&m_pipeline_reg[EX_WB], m_config, this, k));
     m_dispatch_port.push_back(ID_OC_DP);
     m_issue_port.push_back(OC_EX_DP);
   }
+
+  // int_unit → 整数运算
   for (unsigned k = 0; k < m_config->gpgpu_num_int_units; k++) {
     m_fu.push_back(new int_unit(&m_pipeline_reg[EX_WB], m_config, this, k));
     m_dispatch_port.push_back(ID_OC_INT);
     m_issue_port.push_back(OC_EX_INT);
   }
 
+  // sfu → 特殊函数（如 sin, log）
   for (unsigned k = 0; k < m_config->gpgpu_num_sfu_units; k++) {
     m_fu.push_back(new sfu(&m_pipeline_reg[EX_WB], m_config, this, k));
     m_dispatch_port.push_back(ID_OC_SFU);
     m_issue_port.push_back(OC_EX_SFU);
   }
 
+  // tensor_core → 张量核心（矩阵运算）
   for (unsigned k = 0; k < m_config->gpgpu_num_tensor_core_units; k++) {
     m_fu.push_back(new tensor_core(&m_pipeline_reg[EX_WB], m_config, this, k));
     m_dispatch_port.push_back(ID_OC_TENSOR_CORE);
     m_issue_port.push_back(OC_EX_TENSOR_CORE);
   }
 
+  // specialized_unit → 用户自定义专用单元（如 FFT、加密等）
   for (unsigned j = 0; j < m_config->m_specialized_unit.size(); j++) {
     for (unsigned k = 0; k < m_config->m_specialized_unit[j].num_units; k++) {
       m_fu.push_back(new specialized_unit(
@@ -448,6 +502,7 @@ void shader_core_ctx::create_exec_pipeline() {
     }
   }
 
+  // 内存单元（LD/ST Unit）
   m_ldst_unit = new ldst_unit(m_icnt, m_mem_fetch_allocator, this,
                               &m_operand_collector, m_scoreboard, m_config,
                               m_memory_config, m_stats, m_sid, m_tpc, m_gpu);
@@ -459,6 +514,7 @@ void shader_core_ctx::create_exec_pipeline() {
          m_fu.size() == m_dispatch_port.size() and
          m_fu.size() == m_issue_port.size());
 
+  // 结果总线（Result Buses）初始化
   // there are as many result buses as the width of the EX_WB stage
   num_result_bus = m_config->pipe_widths[EX_WB];
   for (unsigned i = 0; i < num_result_bus; i++) {
@@ -1025,33 +1081,44 @@ void shader_core_ctx::fetch() {
   m_L1I->cycle();
 }
 
+// note: 在逻辑上执行一条 warp 指令
 void exec_shader_core_ctx::func_exec_inst(warp_inst_t &inst) {
   execute_warp_inst_t(inst);
+
+  // 内存类指令的后续处理
   if (inst.is_load() || inst.is_store()) {
     inst.generate_mem_accesses();
     // inst.print_m_accessq();
   }
 }
 
+// note:真正“发射”一条 Warp 指令到执行流水线（issue stage）的函数
 void shader_core_ctx::issue_warp(register_set &pipe_reg_set,
                                  const warp_inst_t *next_inst,
                                  const active_mask_t &active_mask,
                                  unsigned warp_id, unsigned sch_id) {
+  // 取得空闲的 pipeline 槽位
   warp_inst_t **pipe_reg =
       pipe_reg_set.get_free(m_config->sub_core_model, sch_id);
   assert(pipe_reg);
 
+  // 从 warp 指令缓冲区取出指令
   m_warp[warp_id]->ibuffer_free();
   assert(next_inst->valid());
   **pipe_reg = *next_inst;  // static instruction information
+
+  // 填充动态信息
   (*pipe_reg)->issue(
       active_mask, warp_id, m_gpu->gpu_tot_sim_cycle + m_gpu->gpu_sim_cycle,
       m_warp[warp_id]->get_dynamic_warp_id(), sch_id,
       m_warp[warp_id]->get_streamID());  // dynamic instruction information
+
+  // 更新统计信息 + 模拟执行
   m_stats->shader_cycle_distro[2 + (*pipe_reg)->active_count()]++;
   func_exec_inst(**pipe_reg);
 
   // Add LDGSTS instructions into a buffer
+  // 特殊指令类型处理：LDGSTS、BARRIER、MEMBAR、DEPBAR
   unsigned int ldgdepbar_id = m_warp[warp_id]->m_ldgdepbar_id;
   if (next_inst->m_is_ldgsts) {
     if (m_warp[warp_id]->m_ldgdepbar_buf.size() == ldgdepbar_id + 1) {
@@ -1125,6 +1192,7 @@ void shader_core_ctx::issue_warp(register_set &pipe_reg_set,
   m_warp[warp_id]->set_next_pc(next_inst->pc + next_inst->isize);
 }
 
+// note: 跨 warp-scheduler 的轮转优先发射
 void shader_core_ctx::issue() {
   // Ensure fair round robin issu between schedulers
   unsigned j;
@@ -1256,7 +1324,9 @@ void scheduler_unit::order_by_priority(
   }
 }
 
+// note: 每个时钟周期调度器的核心逻辑
 void scheduler_unit::cycle() {
+  // 函数声明与变量初始化
   SCHED_DPRINTF("scheduler_unit::cycle()\n");
   bool valid_inst =
       false;  // there was one warp with a valid instruction to issue (didn't
@@ -1265,6 +1335,7 @@ void scheduler_unit::cycle() {
                              // waiting for pending register writes
   bool issued_inst = false;  // of these we issued one
 
+  // 排序并遍历 warp
   order_warps();
   for (std::vector<shd_warp_t *>::const_iterator iter =
            m_next_cycle_prioritized_warps.begin();
@@ -1273,6 +1344,8 @@ void scheduler_unit::cycle() {
     if ((*iter) == NULL || (*iter)->done_exit()) {
       continue;
     }
+
+    // 获取 warp ID 和配置参数
     SCHED_DPRINTF("Testing (warp_id %u, dynamic_warp_id %u)\n",
                   (*iter)->get_warp_id(), (*iter)->get_dynamic_warp_id());
     unsigned warp_id = (*iter)->get_warp_id();
@@ -1298,17 +1371,21 @@ void scheduler_unit::cycle() {
           "barrier\n",
           (*iter)->get_warp_id(), (*iter)->get_dynamic_warp_id());
 
+    //  检查 warp 状态并进入指令发射循环
     while (!warp(warp_id).waiting() && !warp(warp_id).ibuffer_empty() &&
            (checked < max_issue) && (checked <= issued) &&
            (issued < max_issue)) {
+      // 获取下一条指令
       const warp_inst_t *pI = warp(warp_id).ibuffer_next_inst();
       // Jin: handle cdp latency;
+      // 处理 CDP（Cooperative Thread Array Dispatch Protocol）延迟
       if (pI && pI->m_is_cdp && warp(warp_id).m_cdp_latency > 0) {
         assert(warp(warp_id).m_cdp_dummy);
         warp(warp_id).m_cdp_latency--;
         break;
       }
 
+      // 检查指令的有效性和控制冒险
       bool valid = warp(warp_id).ibuffer_next_valid();
       bool warp_inst_issued = false;
       unsigned pc, rpc;
@@ -3669,14 +3746,26 @@ void shader_core_config::set_pipeline_latency() {
   max_tensor_core_latency = tensor_latency;
 }
 
+// note: GPGPU-Sim 模拟 GPU 核心（shader core）每个周期执行流程的核心函数。
+// 逆序模拟
 void shader_core_ctx::cycle() {
   if (!isactive() && get_not_completed() == 0) return;
 
+  // 当前 core 又经历了一个时钟周期
   m_stats->shader_cycles[m_sid]++;
+  // 写回阶段
   writeback();
+
+  // 执行阶段
   execute();
+
+  // 操作数读取阶段
   read_operands();
+
+  // 指令发射阶段
   issue();
+
+  // 前端取指译码
   for (unsigned int i = 0; i < m_config->inst_fetch_throughput; ++i) {
     decode();
     fetch();
@@ -4482,6 +4571,7 @@ simt_core_cluster::simt_core_cluster(class gpgpu_sim *gpu, unsigned cluster_id,
   m_mem_config = mem_config;
 }
 
+// note: 负责在一个 SIMT Core Cluster（即一组 shader cores） 内控制每个核心（core）的周期调度顺序
 void simt_core_cluster::core_cycle() {
   for (std::list<unsigned>::iterator it = m_core_sim_order.begin();
        it != m_core_sim_order.end(); ++it) {

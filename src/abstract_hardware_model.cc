@@ -1190,14 +1190,18 @@ void simt_stack::update(simt_mask_t &thread_done, addr_vector_t &next_pc,
   }
 }
 
+// note: 执行一条 warp 指令的最底层逻辑之一
 void core_t::execute_warp_inst_t(warp_inst_t &inst, unsigned warpId) {
+  // 遍历 warp 内所有线程
   for (unsigned t = 0; t < m_warp_size; t++) {
     if (inst.active(t)) {
       if (warpId == (unsigned(-1))) warpId = inst.warp_id();
       unsigned tid = m_warp_size * warpId + t;
+      // 执行该线程的 PTX 指令
       m_thread[tid]->ptx_exec_inst(inst, t);
 
       // virtual function
+      // 检查执行状态并更新
       checkExecutionStatusAndUpdate(inst, t, tid);
     }
   }
