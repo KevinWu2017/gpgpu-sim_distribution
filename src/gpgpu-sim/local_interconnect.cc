@@ -190,15 +190,22 @@ void xbar_router::RR_Advance() {
 // McKeown, Nick. "The iSLIP scheduling algorithm for input-queued switches."
 // IEEE/ACM transactions on networking 2 (1999): 188-201.
 // https://www.cs.rutgers.edu/~sn624/552-F18/papers/islip.pdf
+/*
+  实现了 iSLIP（Iterative, Self-routing, Load-balancing, Input-queued Packet switch） 算法的一个简化版本
+  哪些输入端口（input ports）可以将其头部请求发送到对应的输出端口（output ports），而不发生冲突。
+*/
 void xbar_router::iSLIP_Advance() {
+  // 初始化 & 冲突统计（用于性能分析）
   bool active = false;
 
   unsigned conflict_sub = 0;
   unsigned reqs = 0;
 
   // calcaulte how many conflicts are there for stats
-  std::set<unsigned> input_nodes;
-  std::set<unsigned> destination_set;
+  std::set<unsigned> input_nodes;           // 有请求的输入端口
+  std::set<unsigned> destination_set;       // 所有目标输出端口
+  // 在当前周期（cycle）中，扫描所有输入端口（input ports），
+  // 收集有请求的输入端口及其目标输出端口，并统计“输出端口冲突”的数量。
   for (unsigned i = 0; i < total_nodes; ++i) {
     if (!in_buffers[i].empty()) {
       input_nodes.insert(i);
@@ -212,31 +219,45 @@ void xbar_router::iSLIP_Advance() {
     }
   }
 
+  // 更新全局统计
   conflicts += conflict_sub;
   if (active) {
     conflicts_util += conflict_sub;
     cycles_util++;
   }
+
+  // 核心：iSLIP 仲裁逻辑（按输出端口轮询）,为每个输出端口维护独立的轮询指针，实现公平、无饥饿的调度。
   // do iSLIP
   for (auto dest : destination_set) {
+    // 输出缓冲区是否有空间？
     if (Has_Buffer_Out(dest, 1)) {
+
+      // 让dest输出端口自己选下一个输入端口是哪个
       unsigned start_node = next_node[dest];
+
+      // 在活跃输入中找到第一个 ≥ start_node 的位置
       auto it =
           std::upper_bound(input_nodes.begin(), input_nodes.end(), start_node);
+      
+      // 从 start_node 开始，循环遍历所有活跃输入（Round-Robin）
       for (unsigned j = 0; j < input_nodes.size(); j++, it++) {
         if (it == input_nodes.end()) {
+          // 循环回到开头
           it = input_nodes.begin();
         }
         unsigned node_id = *it;
         assert(!in_buffers[node_id].empty());
         Packet _packet = in_buffers[node_id].front();
+
+        // 成功匹配！
         if (_packet.output_deviceID == dest) {
-          out_buffers[_packet.output_deviceID].push(_packet);
-          in_buffers[node_id].pop();
-          input_nodes.erase(node_id);  // can only be used once
+          out_buffers[_packet.output_deviceID].push(_packet);   // 发送到输出缓冲区
+          in_buffers[node_id].pop();                            // 从输入缓冲区移除
+          input_nodes.erase(node_id);  // can only be used once // 该输入本轮不能再用（一个输入一周期只能发一个包）
           if (verbose)
             printf("%d : cycle %llu : send req from %d to %d\n", m_id, cycles,
                    node_id, dest - _n_shader);
+           // 更新下一次的轮询起点（+1）
           if (grant_cycles_count == 1)
             next_node[dest] = (++node_id % total_nodes);
           if (verbose) {
@@ -251,8 +272,10 @@ void xbar_router::iSLIP_Advance() {
               }
             }
           }
-
+          
+          // 成功传输请求数 +1
           reqs++;
+          // 本输出端口已服务，处理下一个 dest
           break;
         }
       }
@@ -278,13 +301,14 @@ void xbar_router::iSLIP_Advance() {
     printf("%d : cycle %llu : passing reqs = %d\n", m_id, cycles, reqs);
   }
 
+  //  统计 & 调试输出
   // collect some stats about buffer util
   for (unsigned i = 0; i < total_nodes; ++i) {
     in_buffer_util += in_buffers[i].size();
     out_buffer_util += out_buffers[i].size();
   }
 
-  cycles++;
+  cycles++;  // router 自身 cycle 计数器 +1
 }
 
 bool xbar_router::Busy() const {

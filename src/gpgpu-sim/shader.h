@@ -1130,6 +1130,8 @@ struct ifetch_buffer_t {
 
 class shader_core_config;
 
+// 定义所有 SIMD 功能单元的通用接口和状态
+// 为所有功能单元（ALU、SFU、INT、Tensor Core 等）提供统一接口，便于 shader core 统一调度（即你在 execute() 中看到的 for (n < m_num_function_units) 循环）。
 class simd_function_unit {
  public:
   simd_function_unit(const shader_core_config *config);
@@ -1137,7 +1139,9 @@ class simd_function_unit {
 
   // modifiers
   virtual void issue(register_set &source_reg);
+  // 推进 FU 内部状态（每个 FU 周期调用）
   virtual void cycle() = 0;
+  // 收集流水线中各指令的活跃 lane mask
   virtual void active_lanes_in_pipeline() = 0;
 
   // accessors
@@ -1145,8 +1149,10 @@ class simd_function_unit {
   virtual bool can_issue(const warp_inst_t &inst) const {
     return m_dispatch_reg->empty() && !occupied.test(inst.latency);
   }
+  // 是否支持 sub-core 分区发射
   virtual bool is_issue_partitioned() = 0;
   virtual unsigned get_issue_reg_id() = 0;
+  // 该 FU 是否可被 stall（如 LD/ST 可 stall，ALU 不可）
   virtual bool stallable() const = 0;
   virtual void print(FILE *fp) const {
     fprintf(fp, "%s dispatch= ", m_name.c_str());
@@ -1156,9 +1162,11 @@ class simd_function_unit {
 
  protected:
   std::string m_name;
+  // 指向“发射寄存器”——存放即将进入 FU 的指令
   const shader_core_config *m_config;
   warp_inst_t *m_dispatch_reg;
   static const unsigned MAX_ALU_LATENCY = 512;
+  // 位图：标记未来哪些 cycle 会被写回占用（用于 result bus 预约）
   std::bitset<MAX_ALU_LATENCY> occupied;
 };
 
@@ -1354,6 +1362,7 @@ class shader_memory_interface;
 class shader_core_mem_fetch_allocator;
 class cache_t;
 
+// 负责处理所有内存访问指令（Load/Store）的功能单元
 class ldst_unit : public pipelined_simd_unit {
  public:
   ldst_unit(mem_fetch_interface *icnt,
@@ -1369,6 +1378,7 @@ class ldst_unit : public pipelined_simd_unit {
   /* A multi-level map: unsigned (warp_id) -> unsigned (pc) -> unsigned (addr)
    * -> unsigned (count)
    */
+   // 特殊支持：LDGSTS 指令
   std::map<unsigned /*warp_id*/,
            std::map<unsigned /*pc*/,
                     std::map<unsigned /*addr*/, unsigned /*count*/>>>
@@ -1453,24 +1463,32 @@ class ldst_unit : public pipelined_simd_unit {
                                                            warp_inst_t &inst);
   gpgpu_sim *m_gpu;
 
+  // 内存子系统接口
   const memory_config *m_memory_config;
+  // 连接到 interconnect（片上网络）
   class mem_fetch_interface *m_icnt;
+  // 分配 mem_fetch 对象
   shader_core_mem_fetch_allocator *m_mf_allocator;
   class shader_core_ctx *m_core;
   unsigned m_sid;
   unsigned m_tpc;
 
+  // 纹理缓存（texture cache）
   tex_cache *m_L1T;        // texture cache
+  // 常量缓存（constant cache）
   read_only_cache *m_L1C;  // constant cache
+  // L1 数据缓存（可 bypass）
   l1_cache *m_L1D;         // data cache
+
+  // 请求与响应管理
   std::map<unsigned /*warp_id*/,
            std::map<unsigned /*regnum*/, unsigned /*count*/>>
       m_pending_writes;
-  std::list<mem_fetch *> m_response_fifo;
+  std::list<mem_fetch *> m_response_fifo;     // 从内存返回的已完成请求队列
   opndcoll_rfu_t *m_operand_collector;
   Scoreboard *m_scoreboard;
 
-  mem_fetch *m_next_global;
+  mem_fetch *m_next_global;  // 下一个待处理的全局内存请求
   warp_inst_t m_next_wb;
   unsigned m_writeback_arb;  // round-robin arbiter for writeback contention
                              // between L1T, L1C, shared
@@ -1484,7 +1502,7 @@ class ldst_unit : public pipelined_simd_unit {
   unsigned long long m_last_inst_gpu_sim_cycle;
   unsigned long long m_last_inst_gpu_tot_sim_cycle;
 
-  std::vector<std::deque<mem_fetch *>> l1_latency_queue;
+  std::vector<std::deque<mem_fetch *>> l1_latency_queue;    // 模拟 L1 缓存延迟
   void L1_latency_queue_cycle();
 };
 
@@ -2750,11 +2768,15 @@ class shader_memory_interface : public mem_fetch_interface {
     m_core = core;
     m_cluster = cluster;
   }
+  // 询问 interconnect 的注入缓冲区是否还能容纳 size 字节的请求
   virtual bool full(unsigned size, bool write) const {
     return m_cluster->icnt_injection_buffer_full(size, write);
   }
+
   virtual void push(mem_fetch *mf) {
+    // 统计：增加发出的 flit 数
     m_core->inc_simt_to_mem(mf->get_num_flits(true));
+    // 关键：把 mf 注入 interconnect
     m_cluster->icnt_inject_request_packet(mf);
   }
 

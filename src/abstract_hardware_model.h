@@ -808,6 +808,10 @@ enum cache_operator_type {
   CACHE_WRITE_THROUGH  // .wt
 };
 
+/*
+  一次内存访问请求的元信息（metadata），
+  是 GPU 内存子系统进行地址合并（coalescing）、缓存处理、互连网络传输等操作的基本单位。
+*/
 class mem_access_t {
  public:
   mem_access_t(gpgpu_context *ctx) { init(ctx); }
@@ -879,18 +883,34 @@ class mem_access_t {
     }
   }
 
+  // 指向全局模拟上下文（用于配置、统计等）
   gpgpu_context *gpgpu_ctx;
 
  private:
   void init(gpgpu_context *ctx);
 
+  // 唯一 ID（用于调试或 trace）
   unsigned m_uid;
+
+  // 物理地址（通常是 64 位），对齐到 cache line 边界（如 128B）
   new_addr_type m_addr;  // request address
+
+  // 是否为写请求（store / atomic）
   bool m_write;
+
+  // 请求字节数（如 128B for L1 cache line）
   unsigned m_req_size;  // bytes
+
+  // 访问类型：GLOBAL_ACC_R, LOCAL_ACC_W, CONST_ACC_R 等
   mem_access_type m_type;
+
+  // 哪些线程参与了这次访问（32-bit mask，1 表示活跃）
   active_mask_t m_warp_mask;
+  
+  // 哪些字节有效（用于 partial write 或 non-coalesced load）
   mem_access_byte_mask_t m_byte_mask;
+
+  // 在支持 sector 缓存的架构中，标记哪些 sector 被访问（如 32B sector × 4 = 128B line）
   mem_access_sector_mask_t m_sector_mask;
 };
 
@@ -1146,7 +1166,7 @@ class warp_inst_t : public inst_t {
     std::bitset<4> chunks;  // bitmask: 32-byte chunks accessed
     mem_access_byte_mask_t bytes;
     active_mask_t active;  // threads in this transaction
-
+ 
     bool test_bytes(unsigned start_bit, unsigned end_bit) {
       for (unsigned i = start_bit; i <= end_bit; i++)
         if (bytes.test(i)) return true;

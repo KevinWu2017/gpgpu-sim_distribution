@@ -1973,12 +1973,16 @@ unsigned long long g_single_step =
 void gpgpu_sim::cycle() {
   int clock_mask = next_clock_domain();
 
+  // memory fetch从icnt返回shader core
   if (clock_mask & CORE) {
     // shader core loading (pop from ICNT into core) follows CORE clock
     for (unsigned i = 0; i < m_shader_config->n_simt_clusters; i++)
       m_cluster[i]->icnt_cycle();
   }
+
   unsigned partiton_replys_in_parallel_per_cycle = 0;
+  
+  // memory fetch从memory返回icnt
   if (clock_mask & ICNT) {
     // pop from memory controller to interconnect
     for (unsigned i = 0; i < m_memory_config->m_n_mem_sub_partition; i++) {
@@ -2028,46 +2032,65 @@ void gpgpu_sim::cycle() {
   }
 
   // L2 operations follow L2 clock domain
+  // 从片上互连网络（Interconnect, ICNT）中取出发往 memory 的请求，并将其注入到对应的 memory sub-partition（通常包含 L2 cache）中进行处理。
+  // 初始化计数器
   unsigned partiton_reqs_in_parallel_per_cycle = 0;
+  // 判断是否处于 L2 时钟域
   if (clock_mask & L2) {
+    // 清除上一周期的 L2 性能统计
     m_power_stats->pwr_mem_stat->l2_cache_stats[CURRENT_STAT_IDX].clear();
+    // 遍历所有 memory sub-partition（通常是 L2 bank）
     for (unsigned i = 0; i < m_memory_config->m_n_mem_sub_partition; i++) {
       // move memory request from interconnect into memory partition (if not
       // backed up) Note:This needs to be called in DRAM clock domain if there
       // is no L2 cache in the system In the worst case, we may need to push
       // SECTOR_CHUNCK_SIZE requests, so ensure you have enough buffer for them
+      // 检查 memory sub-partition 是否“满”（流控）
       if (m_memory_sub_partition[i]->full(SECTOR_CHUNCK_SIZE)) {
         gpu_stall_dramfull++;
-      } else {
+      }
+      // 从 Interconnect 弹出请求（关键！）
+      else {
         mem_fetch *mf = (mem_fetch *)icnt_pop(m_shader_config->mem2device(i));
+        // 将请求注入 memory sub-partition
         m_memory_sub_partition[i]->push(mf, gpu_sim_cycle + gpu_tot_sim_cycle);
         if (mf) partiton_reqs_in_parallel_per_cycle++;
       }
+      // 执行 L2 cache 周期操作
       m_memory_sub_partition[i]->cache_cycle(gpu_sim_cycle + gpu_tot_sim_cycle);
+
+      // 功耗统计
       if (m_config.g_power_simulation_enabled) {
         m_memory_sub_partition[i]->accumulate_L2cache_stats(
             m_power_stats->pwr_mem_stat->l2_cache_stats[CURRENT_STAT_IDX]);
       }
     }
   }
+  // 更新全局统计
   partiton_reqs_in_parallel += partiton_reqs_in_parallel_per_cycle;
   if (partiton_reqs_in_parallel_per_cycle > 0) {
     partiton_reqs_in_parallel_util += partiton_reqs_in_parallel_per_cycle;
     gpu_sim_cycle_parition_util++;
   }
 
+  // icnt内部从in_buufer传入out_buffer
   if (clock_mask & ICNT) {
     icnt_transfer();
   }
 
+  // shader core cycle()
   if (clock_mask & CORE) {
     // L1 cache + shader core pipeline stages
     m_power_stats->pwr_mem_stat->core_cache_stats[CURRENT_STAT_IDX].clear();
+
+    // 核心执行函数
     for (unsigned i = 0; i < m_shader_config->n_simt_clusters; i++) {
       if (m_cluster[i]->get_not_completed() || get_more_cta_left()) {
         m_cluster[i]->core_cycle();
         *active_sms += m_cluster[i]->get_n_active_sms();
       }
+
+      // 收集 core ↔ memory 的统计（给功耗模型）
       // Update core icnt/cache stats for AccelWattch
       if (m_config.g_power_simulation_enabled) {
         m_cluster[i]->get_icnt_stats(
@@ -2080,6 +2103,8 @@ void gpgpu_sim::cycle() {
           gpu_occupancy.aggregate_warp_slot_filled,
           gpu_occupancy.aggregate_theoretical_warp_slots);
     }
+
+    // 统计 pipeline duty cycle
     float temp = 0;
     for (unsigned i = 0; i < m_shader_config->num_shader(); i++) {
       temp += m_shader_stats->m_pipeline_duty_cycle[i];
@@ -2089,15 +2114,20 @@ void gpgpu_sim::cycle() {
     // cout<<"Average pipeline duty cycle:
     // "<<*average_pipeline_duty_cycle<<endl;
 
+    // 单步调试支持
     if (g_single_step &&
         ((gpu_sim_cycle + gpu_tot_sim_cycle) >= g_single_step)) {
       raise(SIGTRAP);  // Debug breakpoint
     }
+
+    // 核心周期 +1
     gpu_sim_cycle++;
 
+    // 交互式调试器
     if (g_interactive_debugger_enabled) gpgpu_debug();
 
-      // McPAT main cycle (interface with McPAT)
+    // McPAT main cycle (interface with McPAT)
+    // 调用功耗模型（McPAT / AccelWattch）
 #ifdef GPGPUSIM_POWER_MODEL
     if (m_config.g_power_simulation_enabled) {
       if (m_config.g_power_simulation_mode == 0) {
@@ -2109,9 +2139,11 @@ void gpgpu_sim::cycle() {
     }
 #endif
 
+    // 发射新 CTA / kernel 延迟
     issue_block2core();
     decrement_kernel_latency();
 
+    // 检查是否执行完 + cache flush
     // Depending on configuration, invalidate the caches once all of threads are
     // completed.
     int all_threads_complete = 1;

@@ -942,15 +942,20 @@ const active_mask_t &exec_shader_core_ctx::get_active_mask(
   return m_simt_stack[warp_id]->get_active_mask();
 }
 
+// 把取指阶段拿到的指令反汇编/解析成 warp_inst_t，并放入对应 warp 的指令缓冲区（ibuffer）中，同时更新统计信息。
 void shader_core_ctx::decode() {
+  // 判断是否有可译码指令
   if (m_inst_fetch_buffer.m_valid) {
+    // 取 PC 和第一条指令
     // decode 1 or 2 instructions and place them into ibuffer
     address_type pc = m_inst_fetch_buffer.m_pc;
     const warp_inst_t *pI1 = get_next_inst(m_inst_fetch_buffer.m_warp_id, pc);
+    // 如果第一条指令存在，放入 ibuffer[0]
     if (pI1) {
       m_warp[m_inst_fetch_buffer.m_warp_id]->ibuffer_fill(0, pI1);
       m_warp[m_inst_fetch_buffer.m_warp_id]->inc_inst_in_pipeline();
       m_stats->m_num_decoded_insn[m_sid]++;
+      // 统计指令类型（整数 / 浮点）
       if ((pI1->oprnd_type == INT_OP) ||
           (pI1->oprnd_type == UN_OP)) {  // these counters get added up in mcPat
                                          // to compute scheduler power
@@ -958,6 +963,7 @@ void shader_core_ctx::decode() {
       } else if (pI1->oprnd_type == FP_OP) {
         m_stats->m_num_FPdecoded_insn[m_sid]++;
       }
+      // 尝试取第二条指令（双发射）
       const warp_inst_t *pI2 =
           get_next_inst(m_inst_fetch_buffer.m_warp_id, pc + pI1->isize);
       if (pI2) {
@@ -973,6 +979,7 @@ void shader_core_ctx::decode() {
         }
       }
     }
+    // 清空 fetch buffer
     m_inst_fetch_buffer.m_valid = false;
   }
 }
@@ -1879,22 +1886,40 @@ int shader_core_ctx::test_res_bus(int latency) {
   return -1;
 }
 
+// 在每个周期驱动所有功能单元（Function Units, FUs）执行指令。
+/*
+  结果总线（Result Bus）的更新；
+  各类功能单元（如 ALU、SFU、LD/ST 单元等）的时钟推进；
+  从发射队列（issue register）中选取就绪指令并分发到对应 FU；
+  处理结果写回总线（Result Bus）的预约。
+*/
 void shader_core_ctx::execute() {
+  // 更新结果总线（Result Bus）
   for (unsigned i = 0; i < num_result_bus; i++) {
     *(m_result_bus[i]) >>= 1;
   }
+
+  // 遍历所有功能单元（FUs）
   for (unsigned n = 0; n < m_num_function_units; n++) {
+
+    // 模拟功能单元（Function Unit, FU）相对于 shader core 主时钟的更高运行频率，即 时钟倍频（clock multiplier）机制。
+    // 实际上，GPGPU-Sim 中 multiplier 通常是 整数 ≥1，表示“每个 core cycle 内，FU 能推进多少个自己的微周期”。
     unsigned multiplier = m_fu[n]->clock_multiplier();
     for (unsigned c = 0; c < multiplier; c++) m_fu[n]->cycle();
+
+    // 更新活跃 lane 信息（用于 SIMT 分支管理）
     m_fu[n]->active_lanes_in_pipeline();
+    // 获取发射端口和指令寄存器
     unsigned issue_port = m_issue_port[n];
     register_set &issue_inst = m_pipeline_reg[issue_port];
     unsigned reg_id;
+    // 子核模型支持（Sub-Core Model）
     bool partition_issue =
         m_config->sub_core_model && m_fu[n]->is_issue_partitioned();
     if (partition_issue) {
       reg_id = m_fu[n]->get_issue_reg_id();
     }
+    //  检查是否有就绪指令可发射
     warp_inst_t **ready_reg = issue_inst.get_ready(partition_issue, reg_id);
     if (issue_inst.has_ready(partition_issue, reg_id) &&
         m_fu[n]->can_issue(**ready_reg)) {
@@ -1915,7 +1940,7 @@ void shader_core_ctx::execute() {
 }
 
 void ldst_unit::print_cache_stats(FILE *fp, unsigned &dl1_accesses,
-                                  unsigned &dl1_misses) {
+                                  unsigned &dl1_misses) { 
   if (m_L1D) {
     m_L1D->print(fp, dl1_accesses, dl1_misses);
   }
@@ -2334,19 +2359,23 @@ bool ldst_unit::texture_cycle(warp_inst_t &inst, mem_stage_stall_type &rc_fail,
   return inst.accessq_empty();  // done if empty.
 }
 
+// 负责处理一条 warp 指令对 global / local / param_local 地址空间 的内存访问请求（load/store/atomic）。它是 生成 mem_fetch 并将其推入互连网络（interconnect）的关键路径。
 bool ldst_unit::memory_cycle(warp_inst_t &inst,
                              mem_stage_stall_type &stall_reason,
                              mem_stage_access_type &access_type) {
+  // 前置条件检查（快速返回）
   if (inst.empty() || ((inst.space.get_type() != global_space) &&
                        (inst.space.get_type() != local_space) &&
                        (inst.space.get_type() != param_space_local)))
     return true;
+
   if (inst.active_count() == 0) return true;
   if (inst.accessq_empty()) return true;
 
   mem_stage_stall_type stall_cond = NO_RC_FAIL;
   const mem_access_t &access = inst.accessq_back();
 
+  // 判断是否 bypass L1D
   bool bypassL1D = false;
   if (CACHE_GLOBAL == inst.cache_op || (m_L1D == NULL)) {
     bypassL1D = true;
@@ -2355,6 +2384,8 @@ bool ldst_unit::memory_cycle(warp_inst_t &inst,
     if (m_core->get_config()->gmem_skip_L1D && (CACHE_L1 != inst.cache_op))
       bypassL1D = true;
   }
+
+  // Bypass L1D 路径（直连 interconnect）
   if (bypassL1D) {
     // bypass L1 cache
     unsigned control_size =
@@ -2366,6 +2397,7 @@ bool ldst_unit::memory_cycle(warp_inst_t &inst,
       const mem_access_t &access = inst.accessq_back();
       unsigned size = access.get_size() + control_size;
       // printf("Interconnect:Addr: %x, size=%d\n",access.get_addr(),size);
+      // 检查 interconnect 是否满（SST 模式 or 普通模式）
       if (m_memory_config->SST_mode &&
           (static_cast<sst_memory_interface *>(m_icnt)->full(
               size, inst.is_store() || inst.isatomic(), access.get_type()))) {
@@ -2379,12 +2411,16 @@ bool ldst_unit::memory_cycle(warp_inst_t &inst,
         stall_cond = ICNT_RC_FAIL;
         break;
       } else {
+        // 👇 关键：生成 mem_fetch！ 
+        // 当前模拟的“全局绝对时钟周期”
         mem_fetch *mf =
             m_mf_allocator->alloc(inst, access,
                                   m_core->get_gpu()->gpu_sim_cycle +
                                       m_core->get_gpu()->gpu_tot_sim_cycle);
-        m_icnt->push(mf);
-        inst.accessq_pop_back();
+        m_icnt->push(mf);         // 推入互连网络
+        inst.accessq_pop_back();  // 从队列移除已处理请求
+
+        // 更新统计（load: pending_writes 已在 issue 阶段初始化；store: 计数）
         // inst.clear_active( access.get_warp_mask() );
         if (inst.is_load()) {
           for (unsigned r = 0; r < MAX_OUTPUT_VALUES; r++)
@@ -2394,10 +2430,14 @@ bool ldst_unit::memory_cycle(warp_inst_t &inst,
           m_core->inc_store_req(inst.warp_id());
       }
     }
-  } else {
+  } 
+  // 走 L1D 缓存路径
+  else {
     assert(CACHE_UNDEFINED != inst.cache_op);
     stall_cond = process_memory_access_queue_l1cache(m_L1D, inst);
   }
+
+  // 处理剩余请求与 stall 原因
   if (!inst.accessq_empty() && stall_cond == NO_RC_FAIL)
     stall_cond = COAL_STALL;
   if (stall_cond != NO_RC_FAIL) {
@@ -2408,6 +2448,12 @@ bool ldst_unit::memory_cycle(warp_inst_t &inst,
     else
       access_type = (iswrite) ? G_MEM_ST : G_MEM_LD;
   }
+
+  // 最后返回值
+  /*
+    true：所有内存请求已成功发出 → 指令可继续推进；
+    false：仍有请求未处理（stall）→ LD/ST 单元需在下个 cycle 重试。
+  */
   return inst.accessq_empty();
 }
 
@@ -2437,11 +2483,15 @@ simd_function_unit::simd_function_unit(const shader_core_config *config) {
   m_dispatch_reg = new warp_inst_t(config);
 }
 
+
+// 所有 SIMD 功能单元（如 ALU、SFU、LD/ST 等）发射指令时最终执行“指令转移”和“资源占用标记”的底层逻辑
 void simd_function_unit::issue(register_set &source_reg) {
   bool partition_issue =
       m_config->sub_core_model && this->is_issue_partitioned();
+  // 将就绪指令从输入寄存器移动到本单元的分发寄存器（dispatch register）
   source_reg.move_out_to(partition_issue, this->get_issue_reg_id(),
                          m_dispatch_reg);
+  // 标记功能单元在接下来若干周期内被占用（基于指令延迟）
   occupied.set(m_dispatch_reg->latency);
 }
 
@@ -2649,14 +2699,19 @@ void pipelined_simd_unit::cycle() {
   occupied >>= 1;
 }
 
+// 所有 SIMD 功能单元（如 ALU、SFU、LD/ST 单元等）发射指令的通用基类逻辑。虽然只有几行，但它完成了关键的指令调度、统计和状态转移工作
 void pipelined_simd_unit::issue(register_set &source_reg) {
   // move_warp(m_dispatch_reg,source_reg);
+  // 判断是否启用子核分区发射（Sub-core Partitioning）
   bool partition_issue =
       m_config->sub_core_model && this->is_issue_partitioned();
+  // 获取就绪指令指针（支持分区）
   warp_inst_t **ready_reg =
       source_reg.get_ready(partition_issue, m_issue_reg_id);
+  // 更新执行统计信息
   m_core->incexecstat((*ready_reg));
   // source_reg.move_out_to(m_dispatch_reg);
+  // 调用基类 issue() 完成指令转移
   simd_function_unit::issue(source_reg);
 }
 
@@ -2747,12 +2802,16 @@ ldst_unit::ldst_unit(mem_fetch_interface *icnt,
        mem_config, stats, sid, tpc);
 }
 
+// 将一条内存指令（load/store）从发射队列（issue queue）正式“摄入”到 LD/ST 单元中
 void ldst_unit::issue(register_set &reg_set) {
+  // 获取待发射的指令
   warp_inst_t *inst = *(reg_set.get_ready());
 
   // record how many pending register writes/memory accesses there are for this
   // instruction
   assert(inst->empty() == false);
+
+  // 记录 pending 写回计数（仅对 load 且非 shared）
   if (inst->is_load() and inst->space.get_type() != shared_space) {
     unsigned warp_id = inst->warp_id();
     unsigned n_accesses = inst->accessq_count();
@@ -2767,8 +2826,11 @@ void ldst_unit::issue(register_set &reg_set) {
     }
   }
 
+  // 标记指令所属功能单元
   inst->op_pipe = MEM__OP;
+
   // stat collection
+  // 性能统计
   m_core->mem_instruction_stats(*inst);
   m_core->incmem_stat(m_core->get_config()->warp_size, 1);
   pipelined_simd_unit::issue(reg_set);
@@ -2916,15 +2978,22 @@ inst->space.get_type() != shared_space) { unsigned warp_id = inst->warp_id();
    pipelined_simd_unit::issue(reg_set);
 }
 */
+
+// GPGPU-Sim 中内存功能单元（LD/ST Unit）每个周期的核心调度逻辑，它实现了 异步、事件驱动的内存请求处理机制
 void ldst_unit::cycle() {
+  // 将已完成的 load 结果写回寄存器
   writeback();
 
+  // 推进 Shared Memory 流水线
   for (unsigned stage = 0; (stage + 1) < m_pipeline_depth; stage++)
     if (m_pipeline_reg[stage]->empty() && !m_pipeline_reg[stage + 1]->empty())
       move_warp(m_pipeline_reg[stage], m_pipeline_reg[stage + 1]);
 
+  // 处理 m_response_fifo（核心！）
   if (!m_response_fifo.empty()) {
     mem_fetch *mf = m_response_fifo.front();
+
+    // Texture / Const 请求 → 填入 L1T / L1C
     if (mf->get_access_type() == TEXTURE_ACC_R) {
       if (m_L1T->fill_port_free()) {
         m_L1T->fill(mf, m_core->get_gpu()->gpu_sim_cycle +
@@ -2941,6 +3010,7 @@ void ldst_unit::cycle() {
         m_response_fifo.pop_front();
       }
     } else {
+      // Write Ack 处理
       if (mf->get_type() == WRITE_ACK ||
           ((m_config->gpgpu_perfect_mem || m_memory_config->SST_mode) &&
            mf->get_is_write())) {
@@ -2961,6 +3031,8 @@ void ldst_unit::cycle() {
                        GLOBAL_ACC_W) {  // global memory access
           if (m_core->get_config()->gmem_skip_L1D) bypassL1D = true;
         }
+
+        // Global 请求 → bypass L1D 或填入 L1D
         if (bypassL1D) {
           if (m_next_global == NULL) {
             mf->set_status(IN_SHADER_FETCHED,
@@ -2980,6 +3052,8 @@ void ldst_unit::cycle() {
     }
   }
 
+  // 一条指令只属于一种地址空间（inst.space.get_type()），所以实际上只有一个会真正处理，其余直接返回 true（done）
+  // 推进 L1 缓存状态
   m_L1T->cycle();
   m_L1C->cycle();
   if (m_L1D) {
@@ -2987,6 +3061,7 @@ void ldst_unit::cycle() {
     if (m_config->m_L1D_config.l1_latency > 0) L1_latency_queue_cycle();
   }
 
+  // 尝试发射新内存请求（核心调度逻辑）
   warp_inst_t &pipe_reg = *m_dispatch_reg;
   enum mem_stage_stall_type rc_fail = NO_RC_FAIL;
   mem_stage_access_type type;
@@ -3004,6 +3079,7 @@ void ldst_unit::cycle() {
     return;
   }
 
+  // 指令完成检测与清理
   if (!pipe_reg.empty()) {
     unsigned warp_id = pipe_reg.warp_id();
     if (pipe_reg.is_load()) {
@@ -4714,7 +4790,9 @@ bool sst_simt_core_cluster::SST_injection_buffer_full(unsigned size, bool write,
   }
 }
 
+// 将一个内存请求（mem_fetch *mf）注入到片上互连网络（Interconnect, ICNT），准备发送给 L2 缓存或 DRAM 子系统。
 void simt_core_cluster::icnt_inject_request_packet(class mem_fetch *mf) {
+  // 更新 interconnect 统计信息
   // Update stats based on mf type
   update_icnt_stats(mf);
 
@@ -4722,14 +4800,22 @@ void simt_core_cluster::icnt_inject_request_packet(class mem_fetch *mf) {
   // - For write request and atomic request, the packet contains the data
   // - For read request (i.e. not write nor atomic), the packet only has control
   // metadata
+  // 确定 packet size（包大小）
+  // 对于写命令和原子命令，包里面包含数据
   unsigned int packet_size = mf->size();
+  // 对于读命令，包里面仅仅包含控制数据
   if (!mf->get_is_write() && !mf->isatomic()) {
     packet_size = mf->get_ctrl_size();
   }
+
+  // 记录 outgoing traffic（输出流量）
   m_stats->m_outgoing_traffic_stats->record_traffic(mf, packet_size);
+  // 确定目标 destination（目的地）
   unsigned destination = mf->get_sub_partition_id();
+  // 设置请求状态为 “正在进入 interconnect”
   mf->set_status(IN_ICNT_TO_MEM,
                  m_gpu->gpu_sim_cycle + m_gpu->gpu_tot_sim_cycle);
+  // 调用全局 interconnect 接口 ::icnt_push 发送请求
   if (!mf->get_is_write() && !mf->isatomic())
     ::icnt_push(m_cluster_id, m_config->mem2device(destination), (void *)mf,
                 mf->get_ctrl_size());
@@ -4820,7 +4906,12 @@ void sst_simt_core_cluster::icnt_inject_request_packet_to_SST(
   }
 }
 
+/*
+  GPGPU-Sim / Accel-Sim 中 simt_core_cluster::icnt_cycle() 函数，它在每个模拟周期（cycle）被调用，
+  负责处理 从片上互连网络（Interconnect, ICNT）返回的内存响应（responses），并将其分发给对应的 shader core。
+*/
 void simt_core_cluster::icnt_cycle() {
+  // 交付已缓存的响应（发送给 core）
   if (!m_response_fifo.empty()) {
     mem_fetch *mf = m_response_fifo.front();
     unsigned cid = m_config->sid_to_cid(mf->get_sid());
@@ -4839,6 +4930,7 @@ void simt_core_cluster::icnt_cycle() {
       }
     }
   }
+  // 从 interconnect 接收新响应
   if (m_response_fifo.size() < m_config->n_simt_ejection_buffer_size) {
     mem_fetch *mf = (mem_fetch *)::icnt_pop(m_cluster_id);
     if (!mf) return;

@@ -233,21 +233,31 @@ int memory_partition_unit::global_sub_partition_id_to_local_id(
           m_id * m_config->m_n_sub_partition_per_memory_channel);
 }
 
+
+// 简化 DRAM 模型：一个固定延迟 + 带宽受限的 DRAM 黑盒
 void memory_partition_unit::simple_dram_model_cycle() {
+  // 处理“已经完成的 DRAM 请求”
   // pop completed memory request from dram and push it to dram-to-L2 queue
   // of the original sub partition
+
+  // 检查 DRAM 延迟队列头部的请求是否“时间到了”。
   if (!m_dram_latency_queue.empty() &&
       ((m_gpu->gpu_sim_cycle + m_gpu->gpu_tot_sim_cycle) >=
        m_dram_latency_queue.front().ready_cycle)) {
+    
     mem_fetch *mf_return = m_dram_latency_queue.front().req;
+    // 正常 load/store 返回路径
     if (mf_return->get_access_type() != L1_WRBK_ACC &&
         mf_return->get_access_type() != L2_WRBK_ACC) {
+      // 设置为 reply
       mf_return->set_reply();
-
+      // 找原 sub-partition
       unsigned dest_global_spid = mf_return->get_sub_partition_id();
       int dest_spid = global_sub_partition_id_to_local_id(dest_global_spid);
       assert(m_sub_partition[dest_spid]->get_id() == dest_global_spid);
+      // 压入 dram → L2 queue
       if (!m_sub_partition[dest_spid]->dram_L2_queue_full()) {
+        // writeback 的特殊处理
         if (mf_return->get_access_type() == L1_WRBK_ACC) {
           m_sub_partition[dest_spid]->set_done(mf_return);
           delete mf_return;
@@ -271,6 +281,7 @@ void memory_partition_unit::simple_dram_model_cycle() {
     }
   }
 
+  // 从 L2 仲裁一个请求发给 DRAM
   // mem_fetch *mf = m_sub_partition[spid]->L2_dram_queue_top();
   // if( !m_dram->full(mf->is_write()) ) {
   // L2->DRAM queue to DRAM latency queue
@@ -280,11 +291,18 @@ void memory_partition_unit::simple_dram_model_cycle() {
        p++) {
     int spid = (p + last_issued_partition + 1) %
                m_config->m_n_sub_partition_per_memory_channel;
+    /*
+      L2 miss queue 非空
+      该 sub-partition 还有 credit
+    */
     if (!m_sub_partition[spid]->L2_dram_queue_empty() &&
         can_issue_to_dram(spid)) {
       mem_fetch *mf = m_sub_partition[spid]->L2_dram_queue_top();
+      
+      // DRAM 能不能收？
       if (m_dram->full(mf->is_write())) break;
 
+      // 发射流程
       m_sub_partition[spid]->L2_dram_queue_pop();
       MEMPART_DPRINTF(
           "Issue mem_fetch request %p from sub partition %d to dram\n", mf,
@@ -303,14 +321,18 @@ void memory_partition_unit::simple_dram_model_cycle() {
   //}
 }
 
+// 完整 DRAM 时序模型：多了一个真实的 DRAM 控制器，dram_t（bank / row / timing / scheduler）
 void memory_partition_unit::dram_cycle() {
+  // 处理“已经完成的 DRAM 请求”
   // pop completed memory request from dram and push it to dram-to-L2 queue
   // of the original sub partition
   mem_fetch *mf_return = m_dram->return_queue_top();
   if (mf_return) {
+    // 找原 sub-partition
     unsigned dest_global_spid = mf_return->get_sub_partition_id();
     int dest_spid = global_sub_partition_id_to_local_id(dest_global_spid);
     assert(m_sub_partition[dest_spid]->get_id() == dest_global_spid);
+    // 压入 dram → L2 queue
     if (!m_sub_partition[dest_spid]->dram_L2_queue_full()) {
       if (mf_return->get_access_type() == L1_WRBK_ACC) {
         m_sub_partition[dest_spid]->set_done(mf_return);
@@ -333,6 +355,7 @@ void memory_partition_unit::dram_cycle() {
   m_dram->cycle();
   m_dram->dram_log(SAMPLELOG);
 
+  // 从 L2 仲裁一个请求发给 DRAM
   // mem_fetch *mf = m_sub_partition[spid]->L2_dram_queue_top();
   // if( !m_dram->full(mf->is_write()) ) {
   // L2->DRAM queue to DRAM latency queue
@@ -342,11 +365,18 @@ void memory_partition_unit::dram_cycle() {
        p++) {
     int spid = (p + last_issued_partition + 1) %
                m_config->m_n_sub_partition_per_memory_channel;
+    /*
+      L2 miss queue 非空
+      该 sub-partition 还有 credit
+    */
     if (!m_sub_partition[spid]->L2_dram_queue_empty() &&
         can_issue_to_dram(spid)) {
       mem_fetch *mf = m_sub_partition[spid]->L2_dram_queue_top();
+
+      // DRAM 能不能收？
       if (m_dram->full(mf->is_write())) break;
 
+      // 发射流程
       m_sub_partition[spid]->L2_dram_queue_pop();
       MEMPART_DPRINTF(
           "Issue mem_fetch request %p from sub partition %d to dram\n", mf,
@@ -365,6 +395,7 @@ void memory_partition_unit::dram_cycle() {
   //}
 
   // DRAM latency queue
+  // 把“到点的请求”送入真正 DRAM
   if (!m_dram_latency_queue.empty() &&
       ((m_gpu->gpu_sim_cycle + m_gpu->gpu_tot_sim_cycle) >=
        m_dram_latency_queue.front().ready_cycle) &&
@@ -714,20 +745,29 @@ unsigned memory_sub_partition::invalidateL2() {
 
 bool memory_sub_partition::busy() const { return !m_request_tracker.empty(); }
 
+// 将一个大内存请求拆分成多个 sector 粒度子请求
+// 输入一个 mem_fetch *mf（代表一次 warp 的内存访问），输出一个 std::vector<mem_fetch*>，其中每个元素是一个 sector 级别的请求。
 std::vector<mem_fetch *>
 memory_sub_partition::breakdown_request_to_sector_requests(mem_fetch *mf) {
   std::vector<mem_fetch *> result;
   mem_access_sector_mask_t sector_mask = mf->get_access_sector_mask();
+
+  // 分支 1：已经是单 sector 请求 → 直接返回
   if (mf->get_data_size() == SECTOR_SIZE &&
       mf->get_access_sector_mask().count() == 1) {
     result.push_back(mf);
-  } else if (mf->get_data_size() == MAX_MEMORY_ACCESS_SIZE) {
+  }
+  // 最大事务（128B）→ 拆成全部 4 个 sectors
+  else if (mf->get_data_size() == MAX_MEMORY_ACCESS_SIZE) {
     // break down every sector
+    // 构造 byte mask：覆盖第 i 个 sector 的所有字节
     mem_access_byte_mask_t mask;
     for (unsigned i = 0; i < SECTOR_CHUNCK_SIZE; i++) {
       for (unsigned k = i * SECTOR_SIZE; k < (i + 1) * SECTOR_SIZE; k++) {
         mask.set(k);
       }
+
+      // 分配新 mem_fetch
       mem_fetch *n_mf = m_mf_allocator->alloc(
           mf->get_addr() + SECTOR_SIZE * i, mf->get_access_type(),
           mf->get_access_warp_mask(), mf->get_access_byte_mask() & mask,
@@ -738,7 +778,9 @@ memory_sub_partition::breakdown_request_to_sector_requests(mem_fetch *mf) {
       result.push_back(n_mf);
     }
     // This is for constant cache
-  } else if (mf->get_data_size() == 64 &&
+  }
+  // 64B 请求（常用于 constant cache）
+  else if (mf->get_data_size() == 64 &&
              (mf->get_access_sector_mask().all() ||
               mf->get_access_sector_mask().none())) {
     unsigned start;
@@ -760,7 +802,9 @@ memory_sub_partition::breakdown_request_to_sector_requests(mem_fetch *mf) {
 
       result.push_back(n_mf);
     }
-  } else {
+  }
+  // 通用情况 → 按 sector mask 拆分
+  else {
     for (unsigned i = 0; i < SECTOR_CHUNCK_SIZE; i++) {
       if (sector_mask.test(i)) {
         mem_access_byte_mask_t mask;
@@ -783,23 +827,30 @@ memory_sub_partition::breakdown_request_to_sector_requests(mem_fetch *mf) {
   return result;
 }
 
+//  内存子分区（memory sub-partition）接收来自 interconnect 的内存请求
 void memory_sub_partition::push(mem_fetch *m_req, unsigned long long cycle) {
+  // 空指针检查 & 统计
   if (m_req) {
     m_stats->memlatstat_icnt2mem_pop(m_req);
+    // 请求拆分（仅当使用 SECTOR 缓存时）
     std::vector<mem_fetch *> reqs;
     if (m_config->m_L2_config.m_cache_type == SECTOR)
       reqs = breakdown_request_to_sector_requests(m_req);
     else
       reqs.push_back(m_req);
 
+    // 遍历所有子请求，分别处理
     for (unsigned i = 0; i < reqs.size(); ++i) {
       mem_fetch *req = reqs[i];
       m_request_tracker.insert(req);
+      // 分支处理：Texture vs. Non-Texture
       if (req->istexture()) {
         m_icnt_L2_queue->push(req);
         req->set_status(IN_PARTITION_ICNT_TO_L2_QUEUE,
                         m_gpu->gpu_sim_cycle + m_gpu->gpu_tot_sim_cycle);
-      } else {
+      }
+      // 普通请求（load/store/atomic/global/local）
+      else {
         rop_delay_t r;
         r.req = req;
         r.ready_cycle = cycle + m_config->rop_latency;

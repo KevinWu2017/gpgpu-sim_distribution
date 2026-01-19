@@ -34,6 +34,22 @@
 
 unsigned mem_fetch::sm_next_mf_request_uid = 1;
 
+// GPGPU-Sim 中 mem_fetch 类的构造函数，用于创建一个内存请求对象（mem_fetch），
+// 它是 GPU 内存子系统中从 L1 缓存一直传递到 DRAM 的基本单元。
+/*
+  mem_fetch::mem_fetch(
+    const mem_access_t &access,        // ← 合并后的内存访问描述（地址、mask、size等）
+    const warp_inst_t *inst,           // ← 源指令指针（可能为空）
+    unsigned long long streamID,       // ← 流 ID（用于多流/多 kernel 区分）
+    unsigned ctrl_size,                // ← 控制包大小（READ/WRITE_PACKET_SIZE）
+    unsigned wid,                      // ← warp ID
+    unsigned sid,                      // ← shader core ID
+    unsigned tpc,                      // ← cluster / TPC ID（Tesla 架构术语）
+    const memory_config *config,       // ← 全局内存配置（地址映射、SST 模式等）
+    unsigned long long cycle,          // ← 创建时间戳（全局 cycle）
+    mem_fetch *m_original_mf,          // ← 原始请求（用于写合并或重试）
+    mem_fetch *m_original_wr_mf)       // ← 原始写请求（特殊用途）
+*/
 mem_fetch::mem_fetch(const mem_access_t &access, const warp_inst_t *inst,
                      unsigned long long streamID, unsigned ctrl_size,
                      unsigned wid, unsigned sid, unsigned tpc,
@@ -42,12 +58,17 @@ mem_fetch::mem_fetch(const mem_access_t &access, const warp_inst_t *inst,
     : m_access(access)
 
 {
+  // 唯一 ID 生成
   m_request_uid = sm_next_mf_request_uid++;
+  // 拷贝 mem_access_t 内容
   m_access = access;
+  // 拷贝指令上下文（关键！）
   if (inst) {
     m_inst = *inst;
     assert(wid == m_inst.warp_id());
   }
+
+  // 设置基础属性
   m_streamID = streamID;
   m_data_size = access.get_size();
   m_ctrl_size = ctrl_size;
@@ -55,6 +76,7 @@ mem_fetch::mem_fetch(const mem_access_t &access, const warp_inst_t *inst,
   m_tpc = tpc;
   m_wid = wid;
 
+  // 地址映射（Address Mapping）
   if (!config->is_SST_mode()) {
     // In SST memory model, the SST memory hierarchy is
     // responsible to generate the correct address mapping
@@ -63,6 +85,7 @@ mem_fetch::mem_fetch(const mem_access_t &access, const warp_inst_t *inst,
         config->m_address_mapping.partition_address(access.get_addr());
   }
 
+  // 设置请求类型与状态机
   m_type = m_access.is_write() ? WRITE_REQUEST : READ_REQUEST;
   m_timestamp = cycle;
   m_timestamp2 = 0;
@@ -70,6 +93,8 @@ mem_fetch::mem_fetch(const mem_access_t &access, const warp_inst_t *inst,
   m_status_change = cycle;
   m_mem_config = config;
   icnt_flit_size = config->icnt_flit_size;
+
+  // 处理原始请求指针（高级功能）
   original_mf = m_original_mf;
   original_wr_mf = m_original_wr_mf;
   if (m_original_mf) {

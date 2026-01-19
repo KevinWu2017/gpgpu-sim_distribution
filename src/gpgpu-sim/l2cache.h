@@ -79,7 +79,9 @@ class memory_partition_unit {
 
   bool busy() const;
 
+  // 从 sub partition 取 miss
   void cache_cycle(unsigned cycle);
+  // 推进dram时序
   void dram_cycle();
   void simple_dram_model_cycle();
 
@@ -114,9 +116,12 @@ class memory_partition_unit {
   unsigned m_id;
   const memory_config *m_config;
   class memory_stats_t *m_stats;
+  // 多个 sub-partition: 一条 DRAM channel 下，会挂多个 L2 slice（sub partition）。
   class memory_sub_partition **m_sub_partition;
+  // 一个 DRAM 模型
   class dram_t *m_dram;
 
+  // 仲裁器: 多个 sub_partition 同时想访问同一个 DRAM channel 时，谁先发。
   class arbitration_metadata {
    public:
     arbitration_metadata(const memory_config *config);
@@ -149,6 +154,7 @@ class memory_partition_unit {
   // determine wheither a given subpartition can issue to DRAM
   bool can_issue_to_dram(int inner_sub_partition_id);
 
+  // L2 → DRAM 之间的固定延迟队列
   // model DRAM access scheduler latency (fixed latency between L2 and DRAM)
   struct dram_delay_t {
     unsigned long long ready_cycle;
