@@ -2430,7 +2430,7 @@ bool ldst_unit::memory_cycle(warp_inst_t &inst,
           m_core->inc_store_req(inst.warp_id());
       }
     }
-  } 
+  }
   // 走 L1D 缓存路径
   else {
     assert(CACHE_UNDEFINED != inst.cache_op);

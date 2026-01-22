@@ -60,6 +60,7 @@ mem_fetch *partition_mf_allocator::alloc(new_addr_type addr,
   return mf;
 }
 
+// icnt进入L2时，请求拆分使用这个
 mem_fetch *partition_mf_allocator::alloc(
     new_addr_type addr, mem_access_type type, const active_mask_t &active_mask,
     const mem_access_byte_mask_t &byte_mask,
@@ -257,7 +258,7 @@ void memory_partition_unit::simple_dram_model_cycle() {
       assert(m_sub_partition[dest_spid]->get_id() == dest_global_spid);
       // 压入 dram → L2 queue
       if (!m_sub_partition[dest_spid]->dram_L2_queue_full()) {
-        // writeback 的特殊处理
+        // writeback 的特殊处理,L1 writeback 到 DRAM 完成,不用再返回数据。
         if (mf_return->get_access_type() == L1_WRBK_ACC) {
           m_sub_partition[dest_spid]->set_done(mf_return);
           delete mf_return;

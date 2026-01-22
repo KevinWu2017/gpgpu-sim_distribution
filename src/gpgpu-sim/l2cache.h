@@ -54,6 +54,8 @@ class partition_mf_allocator : public mem_fetch_allocator {
   virtual mem_fetch *alloc(new_addr_type addr, mem_access_type type,
                            unsigned size, bool wr, unsigned long long cycle,
                            unsigned long long streamID) const;
+  
+  // icnt进入L2时，请求拆分使用这个
   virtual mem_fetch *alloc(new_addr_type addr, mem_access_type type,
                            const active_mask_t &active_mask,
                            const mem_access_byte_mask_t &byte_mask,
