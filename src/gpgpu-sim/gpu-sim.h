@@ -340,7 +340,11 @@ class memory_config {
   unsigned gpu_n_mem_per_ctrlr;
 
   unsigned rop_latency;
+  // DDR/HBM
   unsigned dram_latency;
+
+  // HBF
+  unsigned dram_hbf_latency;
 
   // DRAM parameters
 
