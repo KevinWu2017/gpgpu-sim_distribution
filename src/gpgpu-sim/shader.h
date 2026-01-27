@@ -2075,10 +2075,14 @@ class shader_core_mem_fetch_allocator : public mem_fetch_allocator {
   mem_fetch *alloc(const warp_inst_t &inst, const mem_access_t &access,
                    unsigned long long cycle) const {
     warp_inst_t inst_copy = inst;
+    // mem_fetch *mf = new mem_fetch(
+    //     access, &inst_copy, inst.get_streamID(),
+    //     access.is_write() ? WRITE_PACKET_SIZE : READ_PACKET_SIZE,
+    //     inst.warp_id(), m_core_id, m_cluster_id, m_memory_config, cycle);
     mem_fetch *mf = new mem_fetch(
         access, &inst_copy, inst.get_streamID(),
         access.is_write() ? WRITE_PACKET_SIZE : READ_PACKET_SIZE,
-        inst.warp_id(), m_core_id, m_cluster_id, m_memory_config, cycle);
+        inst.warp_id(), m_core_id, m_cluster_id, m_memory_config, cycle, NULL, NULL, inst_copy.fetch_from_hbf);
     return mf;
   }
 

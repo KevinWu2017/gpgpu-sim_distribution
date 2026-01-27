@@ -69,11 +69,22 @@ mem_fetch *partition_mf_allocator::alloc(
     mem_fetch *original_mf, unsigned long long streamID) const {
   mem_access_t access(type, addr, size, wr, active_mask, byte_mask, sector_mask,
                       m_memory_config->gpgpu_ctx);
-  mem_fetch *mf = new mem_fetch(access, NULL, streamID,
-                                wr ? WRITE_PACKET_SIZE : READ_PACKET_SIZE, wid,
-                                sid, tpc, m_memory_config, cycle, original_mf);
+
+  mem_fetch *mf = NULL;
+  if (original_mf != NULL) {
+    mf = new mem_fetch(access, NULL, streamID,
+                                  wr ? WRITE_PACKET_SIZE : READ_PACKET_SIZE, wid,
+                                  sid, tpc, m_memory_config, cycle, original_mf, NULL, original_mf->is_fetch_from_hbf());
+  }
+  else {
+    mf = new mem_fetch(access, NULL, streamID,
+                                  wr ? WRITE_PACKET_SIZE : READ_PACKET_SIZE, wid,
+                                  sid, tpc, m_memory_config, cycle, original_mf);
+  }
+
   return mf;
 }
+
 memory_partition_unit::memory_partition_unit(unsigned partition_id,
                                              const memory_config *config,
                                              class memory_stats_t *stats,
@@ -309,9 +320,20 @@ void memory_partition_unit::simple_dram_model_cycle() {
           "Issue mem_fetch request %p from sub partition %d to dram\n", mf,
           spid);
       dram_delay_t d;
+
+      // 如果需要从hbf取
+      if (mf->is_fetch_from_hbf()) {
+        d.ready_cycle = m_gpu->gpu_sim_cycle + m_gpu->gpu_tot_sim_cycle +
+                        m_config->dram_hbf_latency;
+      }
+      else {
+        d.ready_cycle = m_gpu->gpu_sim_cycle + m_gpu->gpu_tot_sim_cycle +
+                        m_config->dram_latency;
+      }
+
+      // d.ready_cycle = m_gpu->gpu_sim_cycle + m_gpu->gpu_tot_sim_cycle +
+      //                 m_config->dram_latency;
       d.req = mf;
-      d.ready_cycle = m_gpu->gpu_sim_cycle + m_gpu->gpu_tot_sim_cycle +
-                      m_config->dram_latency;
       m_dram_latency_queue.push_back(d);
       mf->set_status(IN_PARTITION_DRAM_LATENCY_QUEUE,
                      m_gpu->gpu_sim_cycle + m_gpu->gpu_tot_sim_cycle);

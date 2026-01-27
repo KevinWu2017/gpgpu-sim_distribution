@@ -54,7 +54,7 @@ mem_fetch::mem_fetch(const mem_access_t &access, const warp_inst_t *inst,
                      unsigned long long streamID, unsigned ctrl_size,
                      unsigned wid, unsigned sid, unsigned tpc,
                      const memory_config *config, unsigned long long cycle,
-                     mem_fetch *m_original_mf, mem_fetch *m_original_wr_mf)
+                     mem_fetch *m_original_mf, mem_fetch *m_original_wr_mf, bool fetch_from_hbf)
     : m_access(access)
 
 {
@@ -101,6 +101,9 @@ mem_fetch::mem_fetch(const mem_access_t &access, const warp_inst_t *inst,
     m_raw_addr.chip = m_original_mf->get_tlx_addr().chip;
     m_raw_addr.sub_partition = m_original_mf->get_tlx_addr().sub_partition;
   }
+
+  // 该次mem_fetch是不是从hbf取
+  fetch_from_hbf = fetch_from_hbf;
 }
 
 mem_fetch::~mem_fetch() { m_status = MEM_FETCH_DELETED; }

@@ -298,7 +298,7 @@ void memory_config::reg_options(class OptionParser *opp) {
                          "DRAM latency (default 30)", "30");
   // HBF
   option_parser_register(opp, "-dram_hbf_latency", OPT_UINT32, &dram_hbf_latency,
-                         "DRAM latency (default 60)", "60");
+                         "DRAM HBF latency (default 60)", "60");
 
   option_parser_register(opp, "-dram_dual_bus_interface", OPT_UINT32,
                          &dual_bus_interface,

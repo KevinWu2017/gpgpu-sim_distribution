@@ -57,7 +57,7 @@ class mem_fetch {
             unsigned long long streamID, unsigned ctrl_size, unsigned wid,
             unsigned sid, unsigned tpc, const memory_config *config,
             unsigned long long cycle, mem_fetch *original_mf = NULL,
-            mem_fetch *original_wr_mf = NULL);
+            mem_fetch *original_wr_mf = NULL, bool fetch_from_hbf = false);
   ~mem_fetch();
 
   void set_status(enum mem_fetch_status status, unsigned long long cycle);
@@ -100,6 +100,9 @@ class mem_fetch {
   bool isconst() const;
   enum mf_type get_type() const { return m_type; }
   bool isatomic() const;
+
+  // hbf
+  bool is_fetch_from_hbf() const { return fetch_from_hbf; }
 
   void set_return_timestamp(unsigned t) { m_timestamp2 = t; }
   void set_icnt_receive_time(unsigned t) { m_icnt_receive_time = t; }
@@ -178,6 +181,8 @@ class mem_fetch {
                      // size), so the pointer refers to the original request
   mem_fetch *original_wr_mf;  // this pointer refers to the original write req,
                               // when fetch-on-write policy is used
+  
+  bool fetch_from_hbf;
 };
 
 #endif
