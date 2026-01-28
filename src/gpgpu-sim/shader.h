@@ -2083,6 +2083,10 @@ class shader_core_mem_fetch_allocator : public mem_fetch_allocator {
         access, &inst_copy, inst.get_streamID(),
         access.is_write() ? WRITE_PACKET_SIZE : READ_PACKET_SIZE,
         inst.warp_id(), m_core_id, m_cluster_id, m_memory_config, cycle, NULL, NULL, inst_copy.fetch_from_hbf);
+
+    // if (mf->is_fetch_from_hbf()) {
+    //     std::cout << "lsc: shader_core_mem_fetch_allocator mf->is_fetch_from_hbf() returns true" << std::endl;
+    // }
     return mf;
   }
 

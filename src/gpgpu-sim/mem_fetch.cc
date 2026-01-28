@@ -103,7 +103,7 @@ mem_fetch::mem_fetch(const mem_access_t &access, const warp_inst_t *inst,
   }
 
   // 该次mem_fetch是不是从hbf取
-  fetch_from_hbf = fetch_from_hbf;
+  this->fetch_from_hbf = fetch_from_hbf;
 }
 
 mem_fetch::~mem_fetch() { m_status = MEM_FETCH_DELETED; }

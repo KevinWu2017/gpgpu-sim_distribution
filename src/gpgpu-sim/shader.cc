@@ -2420,6 +2420,14 @@ bool ldst_unit::memory_cycle(warp_inst_t &inst,
         m_icnt->push(mf);         // 推入互连网络
         inst.accessq_pop_back();  // 从队列移除已处理请求
 
+        // // lsc
+        // if (inst.fetch_from_hbf) {
+        //   std::cout << "lsc: ldst_unit::memory_cycle inst.fetch_from_hbf returns true" << std::endl;
+        // }
+        // if (mf->is_fetch_from_hbf()) {
+        //   std::cout << "lsc: ldst_unit::memory_cycle mf->is_fetch_from_hbf() returns true" << std::endl;
+        // }
+
         // 更新统计（load: pending_writes 已在 issue 阶段初始化；store: 计数）
         // inst.clear_active( access.get_warp_mask() );
         if (inst.is_load()) {

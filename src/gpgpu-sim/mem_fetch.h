@@ -182,7 +182,7 @@ class mem_fetch {
   mem_fetch *original_wr_mf;  // this pointer refers to the original write req,
                               // when fetch-on-write policy is used
   
-  bool fetch_from_hbf;
+  bool fetch_from_hbf = false;
 };
 
 #endif

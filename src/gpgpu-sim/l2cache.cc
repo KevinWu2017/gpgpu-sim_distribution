@@ -82,6 +82,11 @@ mem_fetch *partition_mf_allocator::alloc(
                                   sid, tpc, m_memory_config, cycle, original_mf);
   }
 
+  // // lsc
+  // if (mf->is_fetch_from_hbf()) {
+  //   std::cout << "lsc: mem_fetch *partition_mf_allocator::alloc mf->is_fetch_from_hbf() returns true" << std::endl;
+  // }
+
   return mf;
 }
 
@@ -323,10 +328,12 @@ void memory_partition_unit::simple_dram_model_cycle() {
 
       // 如果需要从hbf取
       if (mf->is_fetch_from_hbf()) {
+        // std::cout << "lsc: is_fetch_from_hbf() returns true" << std::endl;
         d.ready_cycle = m_gpu->gpu_sim_cycle + m_gpu->gpu_tot_sim_cycle +
                         m_config->dram_hbf_latency;
       }
       else {
+        // std::cout << "lsc: is_fetch_from_hbf() returns false" << std::endl;
         d.ready_cycle = m_gpu->gpu_sim_cycle + m_gpu->gpu_tot_sim_cycle +
                         m_config->dram_latency;
       }
