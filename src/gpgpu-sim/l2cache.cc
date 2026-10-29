@@ -318,7 +318,8 @@ void memory_partition_unit::simple_dram_model_cycle() {
       dram_delay_t d;
       d.req = mf;
       d.ready_cycle = m_gpu->gpu_sim_cycle + m_gpu->gpu_tot_sim_cycle +
-                      m_config->dram_latency;
+                      (mf->is_fetch_from_hbf() ? m_config->dram_hbf_latency
+                                               : m_config->dram_latency);
       m_dram_latency_queue.push_back(d);
       mf->set_status(IN_PARTITION_DRAM_LATENCY_QUEUE,
                      m_gpu->gpu_sim_cycle + m_gpu->gpu_tot_sim_cycle);

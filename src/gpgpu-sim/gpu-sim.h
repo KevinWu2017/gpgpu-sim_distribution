@@ -365,6 +365,7 @@ class memory_config {
 
   unsigned rop_latency;
   unsigned dram_latency;
+  unsigned dram_hbf_latency;
 
   // DRAM parameters
 

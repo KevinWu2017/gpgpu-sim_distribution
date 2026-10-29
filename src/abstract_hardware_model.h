@@ -1440,6 +1440,8 @@ class inst_t {
   unsigned data_size;  // what is the size of the word being operated on?
   memory_space_t space;
   cache_operator_type cache_op;
+  // Set by trace replay for memory instructions targeting model weights.
+  bool fetch_from_hbf = false;
 
  protected:
   bool m_decoded;

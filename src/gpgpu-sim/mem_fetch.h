@@ -115,6 +115,7 @@ class mem_fetch {
   bool isconst() const;
   enum mf_type get_type() const { return m_type; }
   bool isatomic() const;
+  bool is_fetch_from_hbf() const { return m_fetch_from_hbf; }
 
   void set_return_timestamp(unsigned t) { m_timestamp2 = t; }
   void set_icnt_receive_time(unsigned t) { m_icnt_receive_time = t; }
@@ -203,6 +204,7 @@ class mem_fetch {
                      // size), so the pointer refers to the original request
   mem_fetch *original_wr_mf;  // this pointer refers to the original write req,
                               // when fetch-on-write policy is used
+  bool m_fetch_from_hbf = false;
 };
 
 #endif
